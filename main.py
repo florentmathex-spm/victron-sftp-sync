@@ -312,15 +312,26 @@ def upload_via_sftp(local_abs_path, remote_dir_config):
         sftp.close()
         ssh.close()
 
+def get_french_now_rounded_5min():
+    """
+    Renvoie l'heure française arrondie à la tranche de 5 minutes inférieure
+    Exemple : 12:04:35 -> 12:00:00 | 12:07:12 -> 12:05:00
+    """
+    now = datetime.now(TZ_FRANCE)
+    # Arrondi de la minute au multiple de 5 inférieur
+    rounded_minute = (now.minute // 5) * 5
+    return now.replace(minute=rounded_minute, second=0, microsecond=0)
+
 # ------------------------------------------------------------------
 # DÉCLENCHEMENT
 # ------------------------------------------------------------------
 if __name__ == "__main__":
     try:
-        now_fr = get_french_now()
+        # Récupère l'heure arrondie à la tranche de 5 min (ex: 12:00:00)
+        now_fr = get_french_now_rounded_5min()
         filename = generate_dynamic_filename(now_fr)
         
-        print(f"1. Récupération du point instantané à {now_fr.strftime('%H:%M:%S')}...")
+        print(f"1. Récupération du point instantané pour le creneau {now_fr.strftime('%H:%M:%S')}...")
         abs_file_path = fetch_instantaneous_and_build_csv(now_fr, filename)
 
         print("2. Envoi SFTP...")
