@@ -2,8 +2,7 @@ name: Automation Victron vers SaaS
 
 on:
   schedule:
-    # S'exécute toutes les heures
-    - cron: '0 * * * *'
+    - cron: '*/5 * * * *'  # Exécution toutes les 5 minutes
   workflow_dispatch:
 
 jobs:
