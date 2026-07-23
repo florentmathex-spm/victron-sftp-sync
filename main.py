@@ -15,13 +15,12 @@ SFTP_HOST = os.getenv("SFTP_HOST")
 SFTP_PORT = int(os.getenv("SFTP_PORT", 22))
 SFTP_USER = os.getenv("SFTP_USER")
 SFTP_PASS = os.getenv("SFTP_PASS")
-SFTP_REMOTE_DIR = os.getenv("SFTP_REMOTE_PATH", "./")
 
 TZ_FRANCE = zoneinfo.ZoneInfo("Europe/Paris")
 
 def get_past_hour_window():
     """
-    Calcule le début et la fin de l'heure écoulée (ex: de 11:00:00 à 11:59:59)
+    Calcule le début et la fin de l'heure écoulée complète
     """
     now = datetime.now(TZ_FRANCE)
     past_hour = now - timedelta(hours=1)
@@ -35,7 +34,6 @@ def get_past_hour_window():
     return start_dt, start_ts, end_ts
 
 def generate_dynamic_filename(start_dt):
-    """Génère un nom de fichier horodaté YYYYMMDD_HHMMSS.csv"""
     time_str = start_dt.strftime("%Y%m%d_%H%M%S")
     return f"solar_data_{time_str}.csv"
 
@@ -43,8 +41,9 @@ def parse_number(val):
     if val is None:
         return ""
     try:
-        return float(val)
-    except (ValueError, TypeError):
+        s = str(val).strip().split()[0].replace(',', '.')
+        return float(s)
+    except (ValueError, TypeError, IndexError):
         return ""
 
 def fetch_and_build_csv(start_dt, start_ts, end_ts, output_file):
@@ -59,13 +58,17 @@ def fetch_and_build_csv(start_dt, start_ts, end_ts, output_file):
     records_diag = diag_res.get("records", [])
 
     instances = {}
+    last_known = {}
+
     for rec in records_diag:
         inst_id = str(rec.get("instance", rec.get("idSite", VRM_SITE_ID)))
         code = str(rec.get("code", ""))
         val = rec.get("formattedValue", rec.get("rawValue", ""))
+        num_val = parse_number(val)
 
         if inst_id not in instances:
             instances[inst_id] = {"type": None, "serial": f"dev_{inst_id}"}
+            last_known[inst_id] = {}
 
         inst = instances[inst_id]
         if code == "ScSN":
@@ -81,50 +84,61 @@ def fetch_and_build_csv(start_dt, start_ts, end_ts, output_file):
             inst["type"] = "converter"
             inst["serial"] = f"inv_{inst_id}"
 
-    # 2. Récupération des données minute par minute via /data-download
-    url_data = f"https://vrmapi.victronenergy.com/v2/installations/{VRM_SITE_ID}/data-download"
-    params = {
+        # Initialisation des valeurs connues
+        dev_type = inst["type"]
+        if dev_type == "mppt":
+            if code in ["PVP", "ScW"]: last_known[inst_id]["power"] = num_val
+            elif code in ["PVV", "ScV"]: last_known[inst_id]["volt"] = num_val
+            elif code in ["ScI"]: last_known[inst_id]["current"] = num_val
+            elif code in ["YT"]: last_known[inst_id]["energy"] = num_val
+        elif dev_type == "battery":
+            if code in ["SOC", "bs"]: last_known[inst_id]["state_of_charge"] = num_val
+            elif code in ["V", "bv"]: last_known[inst_id]["volt"] = num_val
+            elif code in ["I", "bc"]: last_known[inst_id]["current"] = num_val
+            elif code in ["BT", "bT", "CT"]: last_known[inst_id]["temperature"] = num_val
+            elif code in ["ca"]: last_known[inst_id]["capacity"] = num_val
+            elif code in ["BP", "bp"]: last_known[inst_id]["power"] = num_val
+        elif dev_type == "converter":
+            if code in ["OP1"]: last_known[inst_id]["power"] = num_val
+            elif code in ["OV1"]: last_known[inst_id]["volt"] = num_val
+            elif code in ["OI1"]: last_known[inst_id]["current"] = num_val
+            elif code in ["IP1"]: last_known[inst_id]["power_in"] = num_val
+            elif code in ["IV1"]: last_known[inst_id]["volt_in"] = num_val
+            elif code in ["II1"]: last_known[inst_id]["current_in"] = num_val
+            elif code in ["t9"]: last_known[inst_id]["energy_tot"] = num_val
+
+    # 2. Récupération des séries temporelles au pas de 10 minutes
+    url_graph = f"https://vrmapi.victronenergy.com/v2/installations/{VRM_SITE_ID}/widgets/Graph"
+    params_graph = {
         "start": start_ts,
         "end": end_ts,
-        "datatype": "kwh"
+        "interval": "10mins"
     }
     
-    # On récupère aussi les données instantanées de l'heure écoulée
-    url_stats = f"https://vrmapi.victronenergy.com/v2/installations/{VRM_SITE_ID}/stats"
-    params_stats = {
-        "start": start_ts,
-        "end": end_ts,
-        "interval": "1mins",
-        "type": "custom"
-    }
-    
-    stats_res = requests.get(url_stats, headers=headers_api, params=params_stats, timeout=25).json()
-    
-    # Extraction des points de mesure minute par minute
-    # Dictionnaire : (minute_index, instance_id) -> {metrics}
     time_series = {}
+    try:
+        graph_res = requests.get(url_graph, headers=headers_api, params=params_graph, timeout=25).json()
+        records_graph = graph_res.get("records", {})
+        data_records = records_graph.get("data", {}) if isinstance(records_graph, dict) else {}
 
-    records_stats = stats_res.get("records", {})
-    
-    # Parcourt les données minute de l'API VRM
-    if isinstance(records_stats, dict):
-        for code, item in records_stats.items():
-            if isinstance(item, dict) and "data" in item:
-                data_points = item.get("data", [])
-                for point in data_points:
-                    if isinstance(point, list) and len(point) >= 2:
-                        ts = point[0] / 1000.0  # Timestamp Unix en s
-                        val = point[1]
-                        dt_pt = datetime.fromtimestamp(ts, tz=TZ_FRANCE)
-                        dt_key = dt_pt.strftime("%Y-%m-%d %H:%M:00")
-                        
-                        if dt_key not in time_series:
-                            time_series[dt_key] = {}
-                        
-                        # Attribution du code de registre au timestamp
-                        time_series[dt_key][code] = parse_number(val)
+        if isinstance(data_records, dict):
+            for attr_code, meta in data_records.items():
+                if isinstance(meta, dict) and "values" in meta:
+                    points = meta.get("values", [])
+                    for pt in points:
+                        if isinstance(pt, list) and len(pt) >= 2:
+                            ts = pt[0] / 1000.0
+                            val = pt[1]
+                            dt_pt = datetime.fromtimestamp(ts, tz=TZ_FRANCE)
+                            dt_key = dt_pt.strftime("%Y-%m-%d %H:%M:00")
 
-    # 3. Écriture des 60 minutes au format CSV S4E Power API
+                            if dt_key not in time_series:
+                                time_series[dt_key] = {}
+                            time_series[dt_key][attr_code] = parse_number(val)
+    except Exception as e:
+        print(f" Graph API Note: {e}")
+
+    # 3. Écriture du CSV au format S4E Power API (6 points : m = 0, 10, 20, 30, 40, 50)
     headers_csv = [
         "date", "device", "serial", 
         "power", "volt", "current", "energy", "energy_tot",
@@ -133,102 +147,97 @@ def fetch_and_build_csv(start_dt, start_ts, end_ts, output_file):
     ]
 
     rows = []
-    
-    # Génération des 60 minutes exactes de l'heure (de m=0 à m=59)
-    for m in range(60):
-        minute_dt = start_dt + timedelta(minutes=m)
-        minute_str = minute_dt.strftime("%Y-%m-%d %H:%M:00")
-        metrics_pt = time_series.get(minute_str, {})
+
+    # Pas de temps réglé à 10 minutes (0, 10, 20, 30, 40, 50)
+    for m in range(0, 60, 10):
+        step_dt = start_dt + timedelta(minutes=m)
+        step_str = step_dt.strftime("%Y-%m-%d %H:%M:00")
+        metrics_pt = time_series.get(step_str, {})
 
         for inst_id, item in instances.items():
             dev_type = item["type"]
             if dev_type not in ["mppt", "battery", "converter"]:
                 continue
 
-            # Extraction des valeurs si présentes à cette minute
-            pwr = metrics_pt.get("PVP", metrics_pt.get("OP1", metrics_pt.get("P", "")))
-            vlt = metrics_pt.get("PVV", metrics_pt.get("OV1", metrics_pt.get("V", "")))
-            cur = metrics_pt.get("ScI", metrics_pt.get("OI1", metrics_pt.get("I", "")))
-            soc = metrics_pt.get("SOC", metrics_pt.get("bs", ""))
-            temp = metrics_pt.get("BT", metrics_pt.get("CT", ""))
+            known = last_known.get(inst_id, {})
+
+            pwr = metrics_pt.get("PVP", metrics_pt.get("OP1", metrics_pt.get("P", known.get("power", ""))))
+            vlt = metrics_pt.get("PVV", metrics_pt.get("OV1", metrics_pt.get("V", known.get("volt", ""))))
+            cur = metrics_pt.get("ScI", metrics_pt.get("OI1", metrics_pt.get("I", known.get("current", ""))))
+            soc = metrics_pt.get("SOC", metrics_pt.get("bs", known.get("state_of_charge", "")))
+            temp = metrics_pt.get("BT", metrics_pt.get("CT", known.get("temperature", "")))
+            
+            p_in = metrics_pt.get("IP1", known.get("power_in", ""))
+            v_in = metrics_pt.get("IV1", known.get("volt_in", ""))
+            c_in = metrics_pt.get("II1", known.get("current_in", ""))
+            e_tot = metrics_pt.get("t9", known.get("energy_tot", ""))
+            eng = metrics_pt.get("YT", known.get("energy", ""))
+            cap = known.get("capacity", "")
+
+            # Mise à jour du buffer de propagation
+            if pwr != "": known["power"] = pwr
+            if vlt != "": known["volt"] = vlt
+            if cur != "": known["current"] = cur
+            if soc != "": known["state_of_charge"] = soc
+            if temp != "": known["temperature"] = temp
 
             rows.append({
-                "date": minute_str,
+                "date": step_str,
                 "device": dev_type,
                 "serial": item["serial"],
                 "power": pwr,
                 "volt": vlt,
                 "current": cur,
-                "energy": metrics_pt.get("YT", ""),
-                "energy_tot": metrics_pt.get("t9", ""),
-                "power_in": metrics_pt.get("IP1", ""),
-                "volt_in": metrics_pt.get("IV1", ""),
-                "current_in": metrics_pt.get("II1", ""),
+                "energy": eng,
+                "energy_tot": e_tot,
+                "power_in": p_in,
+                "volt_in": v_in,
+                "current_in": c_in,
                 "state_of_charge": soc,
                 "temperature": temp,
-                "capacity": metrics_pt.get("ca", "")
+                "capacity": cap
             })
 
-    with open(output_file, mode="w", newline="", encoding="utf-8") as f:
+    abs_output_path = os.path.abspath(output_file)
+    with open(abs_output_path, mode="w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=headers_csv, delimiter=";", quoting=csv.QUOTE_MINIMAL)
         writer.writeheader()
         writer.writerows(rows)
 
-    print(f" Génération terminée : {len(rows)} lignes écrites dans '{output_file}'.")
+    print(f" Génération réussie (pas de temps 10 min) : {len(rows)} lignes écrites dans '{abs_output_path}'.")
+    return abs_output_path
 
-def upload_via_sftp(local_file, remote_dir):
+def upload_via_sftp(local_abs_path):
+    if not os.path.exists(local_abs_path):
+        raise FileNotFoundError(f"Le fichier local '{local_abs_path}' n'existe pas.")
+
+    filename = os.path.basename(local_abs_path)
+    
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    ssh.connect(
-        hostname=SFTP_HOST,
-        port=SFTP_PORT,
-        username=SFTP_USER,
-        password=SFTP_PASS,
-        timeout=15
-    )
+    ssh.connect(hostname=SFTP_HOST, port=SFTP_PORT, username=SFTP_USER, password=SFTP_PASS, timeout=15)
     
     sftp = ssh.open_sftp()
+    print(f" Transfert du fichier '{filename}' vers le serveur SFTP...")
+    sftp.put(local_abs_path, filename)
     
-    # Nom du fichier simple
-    filename = os.path.basename(local_file)
-    
-    # Nettoyage du dossier distant transmis par le secret
-    clean_dir = remote_dir.strip() if remote_dir else ""
-    
-    if clean_dir in ["", ".", "./", "/"]:
-        remote_file_path = filename
-    else:
-        # Enlève les slashes initiaux/finaux inutiles
-        clean_dir = clean_dir.strip("/")
-        remote_file_path = f"{clean_dir}/{filename}"
-
-    print(f" Dépôt du fichier vers : '{remote_file_path}'")
-    
-    try:
-        sftp.put(local_file, remote_file_path)
-        print(" Transfert SFTP réussi !")
-    except FileNotFoundError:
-        print(f" ERREUR : Le dossier distant '{clean_dir}' n'existe pas sur le serveur SFTP.")
-        print(f" Tentative de dépôt de secours à la racine : '{filename}'...")
-        sftp.put(local_file, filename)
-        print(" Dépôt de secours réussi !")
-
     sftp.close()
     ssh.close()
+    print(" Transfert SFTP réussi avec succès !")
 
 if __name__ == "__main__":
     try:
         start_dt, start_ts, end_ts = get_past_hour_window()
-        local_filename = generate_dynamic_filename(start_dt)
+        filename = generate_dynamic_filename(start_dt)
         
-        print(f"1. Récupération des données minute par minute pour l'heure {start_dt.strftime('%H:00')}...")
-        fetch_and_build_csv(start_dt, start_ts, end_ts, local_filename)
+        print(f"1. Récupération des données au pas de temps 10 min pour l'heure {start_dt.strftime('%H:00')}...")
+        abs_file_path = fetch_and_build_csv(start_dt, start_ts, end_ts, filename)
 
         print("2. Envoi SFTP...")
-        upload_via_sftp(local_filename, SFTP_REMOTE_DIR)
+        upload_via_sftp(abs_file_path)
 
-        if os.path.exists(local_filename):
-            os.remove(local_filename)
+        if os.path.exists(abs_file_path):
+            os.remove(abs_file_path)
             
     except Exception as e:
         print(f" Erreur : {e}")
