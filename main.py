@@ -59,12 +59,37 @@ def format_data_to_csv(data, output_path):
 # ------------------------------------------------------------------
 # 4. ENVOI PAR SFTP
 # ------------------------------------------------------------------
-def upload_via_sftp(local_path, remote_path):
+"""def upload_via_sftp(local_path, remote_path):
     transport = paramiko.Transport((SFTP_HOST, SFTP_PORT))
     transport.connect(username=SFTP_USER, password=SFTP_PASS)
     
     sftp = paramiko.SFTPClient.from_transport(transport)
     sftp.put(local_path, remote_path)
+    
+    sftp.close()
+    transport.close()"""
+
+def upload_via_sftp(local_path, remote_path):
+    print(f"Connexion à {SFTP_HOST}:{SFTP_PORT} avec l'utilisateur {SFTP_USER}...")
+    transport = paramiko.Transport((SFTP_HOST, SFTP_PORT))
+    
+    try:
+        transport.connect(username=SFTP_USER, password=SFTP_PASS)
+    except paramiko.AuthenticationException:
+        print(" ERREUR D'AUTHENTIFICATION : Le nom d'utilisateur ou le mot de passe est rejeté par le serveur SFTP.")
+        raise
+    except Exception as e:
+        print(f" ERREUR DE CONNEXION : {e}")
+        raise
+
+    sftp = paramiko.SFTPClient.from_transport(transport)
+    
+    print(f"Tentative d'écriture du fichier dans : {remote_path}")
+    try:
+        sftp.put(local_path, remote_path)
+    except PermissionError:
+        print(f" ERREUR DE PERMISSION DE FICHIER : Le serveur refuse d'écrire dans '{remote_path}'. Vérifiez le dossier de destination ou les droits d'écriture.")
+        raise
     
     sftp.close()
     transport.close()
