@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 import zoneinfo
 
 # ------------------------------------------------------------------
-# CONFIGURATION
+# CONFIGURATION & SECRETS
 # ------------------------------------------------------------------
 VRM_API_TOKEN = os.getenv("VRM_API_TOKEN")
 VRM_SITE_ID = os.getenv("VRM_SITE_ID")
@@ -15,12 +15,16 @@ SFTP_HOST = os.getenv("SFTP_HOST")
 SFTP_PORT = int(os.getenv("SFTP_PORT", 22))
 SFTP_USER = os.getenv("SFTP_USER")
 SFTP_PASS = os.getenv("SFTP_PASS")
+SFTP_REMOTE_DIR = os.getenv("SFTP_REMOTE_PATH", "./")
 
 TZ_FRANCE = zoneinfo.ZoneInfo("Europe/Paris")
 
+# ------------------------------------------------------------------
+# GESTION DU HORODATAGE ET PAS DE TEMPS 10 MIN
+# ------------------------------------------------------------------
 def get_past_hour_window():
     """
-    Calcule le début et la fin de l'heure écoulée complète
+    Calcule la fenêtre de l'heure écoulee (ex: de 12:00:00 à 12:59:59)
     """
     now = datetime.now(TZ_FRANCE)
     past_hour = now - timedelta(hours=1)
@@ -46,6 +50,9 @@ def parse_number(val):
     except (ValueError, TypeError, IndexError):
         return ""
 
+# ------------------------------------------------------------------
+# EXTRACTION ET FORMATAGE DES DONNÉES S4E POWER API (PAS 10 MIN)
+# ------------------------------------------------------------------
 def fetch_and_build_csv(start_dt, start_ts, end_ts, output_file):
     headers_api = {
         "x-authorization": f"Token {VRM_API_TOKEN}",
@@ -84,7 +91,7 @@ def fetch_and_build_csv(start_dt, start_ts, end_ts, output_file):
             inst["type"] = "converter"
             inst["serial"] = f"inv_{inst_id}"
 
-        # Initialisation des valeurs connues
+        # Conservation des valeurs connues pour fallback
         dev_type = inst["type"]
         if dev_type == "mppt":
             if code in ["PVP", "ScW"]: last_known[inst_id]["power"] = num_val
@@ -107,7 +114,7 @@ def fetch_and_build_csv(start_dt, start_ts, end_ts, output_file):
             elif code in ["II1"]: last_known[inst_id]["current_in"] = num_val
             elif code in ["t9"]: last_known[inst_id]["energy_tot"] = num_val
 
-    # 2. Récupération des séries temporelles au pas de 10 minutes
+    # 2. Récupération des séries temporelles
     url_graph = f"https://vrmapi.victronenergy.com/v2/installations/{VRM_SITE_ID}/widgets/Graph"
     params_graph = {
         "start": start_ts,
@@ -136,9 +143,9 @@ def fetch_and_build_csv(start_dt, start_ts, end_ts, output_file):
                                 time_series[dt_key] = {}
                             time_series[dt_key][attr_code] = parse_number(val)
     except Exception as e:
-        print(f" Graph API Note: {e}")
+        print(f" Note API Graph : {e}")
 
-    # 3. Écriture du CSV au format S4E Power API (6 points : m = 0, 10, 20, 30, 40, 50)
+    # 3. Écriture du CSV (pas de temps 10 min : 0, 10, 20, 30, 40, 50 min)
     headers_csv = [
         "date", "device", "serial", 
         "power", "volt", "current", "energy", "energy_tot",
@@ -147,8 +154,6 @@ def fetch_and_build_csv(start_dt, start_ts, end_ts, output_file):
     ]
 
     rows = []
-
-    # Pas de temps réglé à 10 minutes (0, 10, 20, 30, 40, 50)
     for m in range(0, 60, 10):
         step_dt = start_dt + timedelta(minutes=m)
         step_str = step_dt.strftime("%Y-%m-%d %H:%M:00")
@@ -174,7 +179,6 @@ def fetch_and_build_csv(start_dt, start_ts, end_ts, output_file):
             eng = metrics_pt.get("YT", known.get("energy", ""))
             cap = known.get("capacity", "")
 
-            # Mise à jour du buffer de propagation
             if pwr != "": known["power"] = pwr
             if vlt != "": known["volt"] = vlt
             if cur != "": known["current"] = cur
@@ -204,27 +208,58 @@ def fetch_and_build_csv(start_dt, start_ts, end_ts, output_file):
         writer.writeheader()
         writer.writerows(rows)
 
-    print(f" Génération réussie (pas de temps 10 min) : {len(rows)} lignes écrites dans '{abs_output_path}'.")
+    print(f" Génération CSV réussie ({len(rows)} lignes générées).")
     return abs_output_path
 
-def upload_via_sftp(local_abs_path):
+# ------------------------------------------------------------------
+# ENVOI SFTP ROBUSTE (AVEC GESTION DU REPERTOIRE ET DES DROITS)
+# ------------------------------------------------------------------
+def upload_via_sftp(local_abs_path, remote_dir_config):
     if not os.path.exists(local_abs_path):
-        raise FileNotFoundError(f"Le fichier local '{local_abs_path}' n'existe pas.")
+        raise FileNotFoundError(f"Le fichier local '{local_abs_path}' est introuvable.")
 
     filename = os.path.basename(local_abs_path)
     
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    ssh.connect(hostname=SFTP_HOST, port=SFTP_PORT, username=SFTP_USER, password=SFTP_PASS, timeout=15)
+    ssh.connect(
+        hostname=SFTP_HOST,
+        port=SFTP_PORT,
+        username=SFTP_USER,
+        password=SFTP_PASS,
+        look_for_keys=False,
+        allow_agent=False,
+        timeout=15
+    )
     
     sftp = ssh.open_sftp()
-    print(f" Transfert du fichier '{filename}' vers le serveur SFTP...")
-    sftp.put(local_abs_path, filename)
-    
-    sftp.close()
-    ssh.close()
-    print(" Transfert SFTP réussi avec succès !")
 
+    # Nettoyage sécurisé du dossier distant pour éviter l'écriture sur la racine système /
+    clean_dir = (remote_dir_config or "").strip()
+    
+    if clean_dir in ["", ".", "./", "/"]:
+        remote_target = filename
+    else:
+        # Supprime le slash initial qui provoque l'Errno 13
+        clean_dir = clean_dir.lstrip('/')
+        remote_target = f"{clean_dir}/{filename}" if not clean_dir.endswith('/') else f"{clean_dir}{filename}"
+
+    print(f" Transfert du fichier vers le serveur SFTP (Destination: '{remote_target}')...")
+    
+    try:
+        sftp.put(local_abs_path, remote_target)
+        print(" Transfert SFTP réussi avec succès !")
+    except PermissionError:
+        print(f" ERREUR DROITS : Permission refusée sur '{remote_target}'. Tentative de secours dans le dossier distant par défaut...")
+        sftp.put(local_abs_path, filename)
+        print(" Transfert de secours réussi !")
+    finally:
+        sftp.close()
+        ssh.close()
+
+# ------------------------------------------------------------------
+# DÉCLENCHEMENT
+# ------------------------------------------------------------------
 if __name__ == "__main__":
     try:
         start_dt, start_ts, end_ts = get_past_hour_window()
@@ -234,7 +269,7 @@ if __name__ == "__main__":
         abs_file_path = fetch_and_build_csv(start_dt, start_ts, end_ts, filename)
 
         print("2. Envoi SFTP...")
-        upload_via_sftp(abs_file_path)
+        upload_via_sftp(abs_file_path, SFTP_REMOTE_DIR)
 
         if os.path.exists(abs_file_path):
             os.remove(abs_file_path)
