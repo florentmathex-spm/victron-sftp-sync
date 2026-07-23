@@ -21,14 +21,13 @@ TZ_FRANCE = zoneinfo.ZoneInfo("Europe/Paris")
 
 def get_past_hour_window():
     """
-    Calcule le début et la fin de l'heure écoulée complète (ex: de 12:00:00 à 12:59:00)
+    Calcule le début et la fin de l'heure écoulée (ex: de 11:00:00 à 11:59:59)
     """
     now = datetime.now(TZ_FRANCE)
-    # L'heure précédente
     past_hour = now - timedelta(hours=1)
     
     start_dt = past_hour.replace(minute=0, second=0, microsecond=0)
-    end_dt = past_hour.replace(minute=59, second=0, microsecond=0)
+    end_dt = past_hour.replace(minute=59, second=59, microsecond=0)
     
     start_ts = int(start_dt.timestamp())
     end_ts = int(end_dt.timestamp())
@@ -36,30 +35,9 @@ def get_past_hour_window():
     return start_dt, start_ts, end_ts
 
 def generate_dynamic_filename(start_dt):
-    """Génère un nom de fichier horodaté désignant l'heure collectée : solar_data_20260723_120000.csv"""
+    """Génère un nom de fichier horodaté YYYYMMDD_HHMMSS.csv"""
     time_str = start_dt.strftime("%Y%m%d_%H%M%S")
     return f"solar_data_{time_str}.csv"
-
-def fetch_victron_minute_stats(start_ts, end_ts):
-    """
-    Récupère les graphiques/widgets minute par minute de l'installation
-    """
-    url = f"https://vrmapi.victronenergy.com/v2/installations/{VRM_SITE_ID}/stats"
-    headers = {
-        "x-authorization": f"Token {VRM_API_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    # Demande le pas de temps 1 minute ("1min" ou "60")
-    params = {
-        "start": start_ts,
-        "end": end_ts,
-        "interval": "1min",
-        "type": "custom"
-    }
-    
-    response = requests.get(url, headers=headers, params=params, timeout=25)
-    response.raise_for_status()
-    return response.json()
 
 def parse_number(val):
     if val is None:
@@ -69,19 +47,19 @@ def parse_number(val):
     except (ValueError, TypeError):
         return ""
 
-def generate_minute_by_minute_csv(start_dt, start_ts, end_ts, output_file):
-    """
-    Génère un fichier CSV contenant une ligne pour chaque minute de l'heure écoulée
-    """
-    # Équipements répertoriés
-    url_diag = f"https://vrmapi.victronenergy.com/v2/installations/{VRM_SITE_ID}/diagnostics"
-    headers = {"x-authorization": f"Token {VRM_API_TOKEN}", "Content-Type": "application/json"}
-    diag_data = requests.get(url_diag, headers=headers, timeout=20).json()
-    records = diag_data.get("records", [])
+def fetch_and_build_csv(start_dt, start_ts, end_ts, output_file):
+    headers_api = {
+        "x-authorization": f"Token {VRM_API_TOKEN}",
+        "Content-Type": "application/json"
+    }
 
-    # Identification des numéros de série par instance
+    # 1. Cartographie des équipements via /diagnostics
+    url_diag = f"https://vrmapi.victronenergy.com/v2/installations/{VRM_SITE_ID}/diagnostics"
+    diag_res = requests.get(url_diag, headers=headers_api, timeout=20).json()
+    records_diag = diag_res.get("records", [])
+
     instances = {}
-    for rec in records:
+    for rec in records_diag:
         inst_id = str(rec.get("instance", rec.get("idSite", VRM_SITE_ID)))
         code = str(rec.get("code", ""))
         val = rec.get("formattedValue", rec.get("rawValue", ""))
@@ -103,8 +81,51 @@ def generate_minute_by_minute_csv(start_dt, start_ts, end_ts, output_file):
             inst["type"] = "converter"
             inst["serial"] = f"inv_{inst_id}"
 
-    # Construction des 60 timestamps de la minute 0 à 59
-    headers = [
+    # 2. Récupération des données minute par minute via /data-download
+    url_data = f"https://vrmapi.victronenergy.com/v2/installations/{VRM_SITE_ID}/data-download"
+    params = {
+        "start": start_ts,
+        "end": end_ts,
+        "datatype": "kwh"
+    }
+    
+    # On récupère aussi les données instantanées de l'heure écoulée
+    url_stats = f"https://vrmapi.victronenergy.com/v2/installations/{VRM_SITE_ID}/stats"
+    params_stats = {
+        "start": start_ts,
+        "end": end_ts,
+        "interval": "1mins",
+        "type": "custom"
+    }
+    
+    stats_res = requests.get(url_stats, headers=headers_api, params=params_stats, timeout=25).json()
+    
+    # Extraction des points de mesure minute par minute
+    # Dictionnaire : (minute_index, instance_id) -> {metrics}
+    time_series = {}
+
+    records_stats = stats_res.get("records", {})
+    
+    # Parcourt les données minute de l'API VRM
+    if isinstance(records_stats, dict):
+        for code, item in records_stats.items():
+            if isinstance(item, dict) and "data" in item:
+                data_points = item.get("data", [])
+                for point in data_points:
+                    if isinstance(point, list) and len(point) >= 2:
+                        ts = point[0] / 1000.0  # Timestamp Unix en s
+                        val = point[1]
+                        dt_pt = datetime.fromtimestamp(ts, tz=TZ_FRANCE)
+                        dt_key = dt_pt.strftime("%Y-%m-%d %H:%M:00")
+                        
+                        if dt_key not in time_series:
+                            time_series[dt_key] = {}
+                        
+                        # Attribution du code de registre au timestamp
+                        time_series[dt_key][code] = parse_number(val)
+
+    # 3. Écriture des 60 minutes au format CSV S4E Power API
+    headers_csv = [
         "date", "device", "serial", 
         "power", "volt", "current", "energy", "energy_tot",
         "power_in", "volt_in", "current_in", 
@@ -112,42 +133,48 @@ def generate_minute_by_minute_csv(start_dt, start_ts, end_ts, output_file):
     ]
 
     rows = []
-
-    # Pour chaque minute de l'heure (60 itérations)
+    
+    # Génération des 60 minutes exactes de l'heure (de m=0 à m=59)
     for m in range(60):
-        current_minute_dt = start_dt + timedelta(minutes=m)
-        date_str = current_minute_dt.strftime("%Y-%m-%d %H:%M:%S")
+        minute_dt = start_dt + timedelta(minutes=m)
+        minute_str = minute_dt.strftime("%Y-%m-%d %H:%M:00")
+        metrics_pt = time_series.get(minute_str, {})
 
-        # Extraction des valeurs pour chaque appareil
         for inst_id, item in instances.items():
             dev_type = item["type"]
             if dev_type not in ["mppt", "battery", "converter"]:
                 continue
 
+            # Extraction des valeurs si présentes à cette minute
+            pwr = metrics_pt.get("PVP", metrics_pt.get("OP1", metrics_pt.get("P", "")))
+            vlt = metrics_pt.get("PVV", metrics_pt.get("OV1", metrics_pt.get("V", "")))
+            cur = metrics_pt.get("ScI", metrics_pt.get("OI1", metrics_pt.get("I", "")))
+            soc = metrics_pt.get("SOC", metrics_pt.get("bs", ""))
+            temp = metrics_pt.get("BT", metrics_pt.get("CT", ""))
+
             rows.append({
-                "date": date_str,
+                "date": minute_str,
                 "device": dev_type,
                 "serial": item["serial"],
-                "power": "",
-                "volt": "",
-                "current": "",
-                "energy": "",
-                "energy_tot": "",
-                "power_in": "",
-                "volt_in": "",
-                "current_in": "",
-                "state_of_charge": "",
-                "temperature": "",
-                "capacity": ""
+                "power": pwr,
+                "volt": vlt,
+                "current": cur,
+                "energy": metrics_pt.get("YT", ""),
+                "energy_tot": metrics_pt.get("t9", ""),
+                "power_in": metrics_pt.get("IP1", ""),
+                "volt_in": metrics_pt.get("IV1", ""),
+                "current_in": metrics_pt.get("II1", ""),
+                "state_of_charge": soc,
+                "temperature": temp,
+                "capacity": metrics_pt.get("ca", "")
             })
 
-    # Écriture du CSV S4E
     with open(output_file, mode="w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=headers, delimiter=";", quoting=csv.QUOTE_MINIMAL)
+        writer = csv.DictWriter(f, fieldnames=headers_csv, delimiter=";", quoting=csv.QUOTE_MINIMAL)
         writer.writeheader()
         writer.writerows(rows)
 
-    print(f" CSV Horaire au pas de temps 1min généré : {len(rows)} lignes écrites dans '{output_file}'.")
+    print(f" Génération terminée : {len(rows)} lignes écrites dans '{output_file}'.")
 
 def upload_via_sftp(local_file, remote_dir):
     ssh = paramiko.SSHClient()
@@ -170,8 +197,8 @@ if __name__ == "__main__":
         start_dt, start_ts, end_ts = get_past_hour_window()
         local_filename = generate_dynamic_filename(start_dt)
         
-        print(f"1. Récupération des 60 minutes de l'heure {start_dt.strftime('%H:00')}...")
-        generate_minute_by_minute_csv(start_dt, start_ts, end_ts, local_filename)
+        print(f"1. Récupération des données minute par minute pour l'heure {start_dt.strftime('%H:00')}...")
+        fetch_and_build_csv(start_dt, start_ts, end_ts, local_filename)
 
         print("2. Envoi SFTP...")
         upload_via_sftp(local_filename, SFTP_REMOTE_DIR)
