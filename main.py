@@ -70,29 +70,42 @@ def format_data_to_csv(data, output_path):
     transport.close()"""
 
 def upload_via_sftp(local_path, remote_path):
-    print(f"Connexion à {SFTP_HOST}:{SFTP_PORT} avec l'utilisateur {SFTP_USER}...")
-    transport = paramiko.Transport((SFTP_HOST, SFTP_PORT))
+    print(f"Connexion SFTP à {SFTP_HOST}:{SFTP_PORT} avec l'utilisateur {SFTP_USER}...")
+    
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     
     try:
-        transport.connect(username=SFTP_USER, password=SFTP_PASS)
-    except paramiko.AuthenticationException:
-        print(" ERREUR D'AUTHENTIFICATION : Le nom d'utilisateur ou le mot de passe est rejeté par le serveur SFTP.")
-        raise
-    except Exception as e:
-        print(f" ERREUR DE CONNEXION : {e}")
-        raise
+        ssh.connect(
+            hostname=SFTP_HOST,
+            port=SFTP_PORT,
+            username=SFTP_USER,
+            password=SFTP_PASS,
+            look_for_keys=False,
+            allow_agent=False,
+            timeout=10
+        )
+        
+        sftp = ssh.open_sftp()
+        
+        # Afficher le dossier courant dans lequel le serveur nous dépose
+        current_dir = sftp.getcwd()
+        print(f" Dossier distant courant : {current_dir}")
+        
+        # S'assurer qu'on n'essaie pas d'écrire à la racine absolue si un chemin relatif est fourni
+        clean_remote_path = remote_path.lstrip('/') if not remote_path.startswith('./') else remote_path
+        
+        print(f"Tentative d'écriture vers : '{clean_remote_path}'")
+        sftp.put(local_path, clean_remote_path)
+        
+        print(" Fichier transféré avec succès !")
+        
+        sftp.close()
+        ssh.close()
 
-    sftp = paramiko.SFTPClient.from_transport(transport)
-    
-    print(f"Tentative d'écriture du fichier dans : {remote_path}")
-    try:
-        sftp.put(local_path, remote_path)
-    except PermissionError:
-        print(f" ERREUR DE PERMISSION DE FICHIER : Le serveur refuse d'écrire dans '{remote_path}'. Vérifiez le dossier de destination ou les droits d'écriture.")
+    except Exception as e:
+        print(f" Échec du transfert : {e}")
         raise
-    
-    sftp.close()
-    transport.close()
 
 # ------------------------------------------------------------------
 # PIPELINE PRINCIPAL
