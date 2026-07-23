@@ -1,0 +1,36 @@
+name: Automation Victron vers SaaS
+
+on:
+  schedule:
+    # S'exécute toutes les heures à la minute 0 (00:00, 01:00, etc.)
+    - cron: '0 * * * *'
+  # Permet de lancer le script manuellement depuis GitHub quand vous voulez
+  workflow_dispatch:
+
+jobs:
+  run-python-script:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Récupération du code
+        uses: actions/checkout@v4
+
+      - name: Configuration de Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installation des bibliothèques nécessaires
+        run: |
+          pip install requests paramiko
+
+      - name: Exécution du script Python
+        env:
+          VRM_API_TOKEN: ${{ secrets.VRM_API_TOKEN }}
+          VRM_SITE_ID: ${{ secrets.VRM_SITE_ID }}
+          SFTP_HOST: ${{ secrets.SFTP_HOST }}
+          SFTP_PORT: ${{ secrets.SFTP_PORT }}
+          SFTP_USER: ${{ secrets.SFTP_USER }}
+          SFTP_PASS: ${{ secrets.SFTP_PASS }}
+          SFTP_REMOTE_PATH: ${{ secrets.SFTP_REMOTE_PATH }}
+        run: python main.py
