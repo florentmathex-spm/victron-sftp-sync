@@ -179,18 +179,42 @@ def fetch_and_build_csv(start_dt, start_ts, end_ts, output_file):
 def upload_via_sftp(local_file, remote_dir):
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    ssh.connect(hostname=SFTP_HOST, port=SFTP_PORT, username=SFTP_USER, password=SFTP_PASS, timeout=10)
+    ssh.connect(
+        hostname=SFTP_HOST,
+        port=SFTP_PORT,
+        username=SFTP_USER,
+        password=SFTP_PASS,
+        timeout=15
+    )
     
     sftp = ssh.open_sftp()
-    clean_dir = remote_dir.rstrip('/') if remote_dir != './' else '.'
-    remote_file_path = f"{clean_dir}/{os.path.basename(local_file)}" if clean_dir != '.' else os.path.basename(local_file)
     
-    print(f" Transfert vers SFTP : '{remote_file_path}'")
-    sftp.put(local_file, remote_file_path)
+    # Nom du fichier simple
+    filename = os.path.basename(local_file)
     
+    # Nettoyage du dossier distant transmis par le secret
+    clean_dir = remote_dir.strip() if remote_dir else ""
+    
+    if clean_dir in ["", ".", "./", "/"]:
+        remote_file_path = filename
+    else:
+        # Enlève les slashes initiaux/finaux inutiles
+        clean_dir = clean_dir.strip("/")
+        remote_file_path = f"{clean_dir}/{filename}"
+
+    print(f" Dépôt du fichier vers : '{remote_file_path}'")
+    
+    try:
+        sftp.put(local_file, remote_file_path)
+        print(" Transfert SFTP réussi !")
+    except FileNotFoundError:
+        print(f" ERREUR : Le dossier distant '{clean_dir}' n'existe pas sur le serveur SFTP.")
+        print(f" Tentative de dépôt de secours à la racine : '{filename}'...")
+        sftp.put(local_file, filename)
+        print(" Dépôt de secours réussi !")
+
     sftp.close()
     ssh.close()
-    print(" Transfert SFTP réussi !")
 
 if __name__ == "__main__":
     try:
