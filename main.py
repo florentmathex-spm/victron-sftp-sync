@@ -2,7 +2,7 @@ import os
 import csv
 import requests
 import paramiko
-from datetime import datetime, timedelta
+from datetime import datetime
 import zoneinfo
 
 # ------------------------------------------------------------------
@@ -22,20 +22,11 @@ TZ_FRANCE = zoneinfo.ZoneInfo("Europe/Paris")
 # ------------------------------------------------------------------
 # UTILITAIRES
 # ------------------------------------------------------------------
-def get_past_hour_window():
-    now = datetime.now(TZ_FRANCE)
-    past_hour = now - timedelta(hours=1)
-    
-    start_dt = past_hour.replace(minute=0, second=0, microsecond=0)
-    end_dt = past_hour.replace(minute=59, second=59, microsecond=0)
-    
-    start_ts = int(start_dt.timestamp())
-    end_ts = int(end_dt.timestamp())
-    
-    return start_dt, start_ts, end_ts
+def get_french_now():
+    return datetime.now(TZ_FRANCE)
 
-def generate_dynamic_filename(start_dt):
-    time_str = start_dt.strftime("%Y%m%d_%H%M%S")
+def generate_dynamic_filename(dt_now):
+    time_str = dt_now.strftime("%Y%m%d_%H%M%S")
     return f"solar_data_{time_str}.csv"
 
 def parse_number(val):
@@ -48,27 +39,27 @@ def parse_number(val):
         return ""
 
 def calc_current(power, volt):
-    """Calcule le courant I = P / V si la tension est strictement positive"""
+    """Calcule I = P / V si la tension est strictement positive"""
     if isinstance(power, (int, float)) and isinstance(volt, (int, float)) and volt > 0:
         return round(power / volt, 2)
     return 0.0
 
 # ------------------------------------------------------------------
-# EXTRACTION & CONSTRUCTION DU CSV VIRTUEL (CUSTOM1 & BATTERIE1)
+# EXTRACTION & CONSTRUCTION DU POINT UNIQUE (CUSTOM1 & BATTERIE1)
 # ------------------------------------------------------------------
-def fetch_and_build_csv(start_dt, start_ts, end_ts, output_file):
+def fetch_instantaneous_and_build_csv(dt_now, output_file):
     headers_api = {
         "x-authorization": f"Token {VRM_API_TOKEN}",
         "Content-Type": "application/json"
     }
 
-    # 1. Cartographie et dernières valeurs instantanées via /diagnostics
+    # Interrogation directe de l'endpoint diagnostics
     url_diag = f"https://vrmapi.victronenergy.com/v2/installations/{VRM_SITE_ID}/diagnostics"
     diag_res = requests.get(url_diag, headers=headers_api, timeout=20).json()
     records_diag = diag_res.get("records", [])
 
     instances = {}
-    last_known = {}
+    metrics_by_instance = {}
 
     for rec in records_diag:
         inst_id = str(rec.get("instance", rec.get("idSite", VRM_SITE_ID)))
@@ -78,7 +69,7 @@ def fetch_and_build_csv(start_dt, start_ts, end_ts, output_file):
 
         if inst_id not in instances:
             instances[inst_id] = {"type": None, "serial": f"dev_{inst_id}"}
-            last_known[inst_id] = {}
+            metrics_by_instance[inst_id] = {}
 
         inst = instances[inst_id]
 
@@ -96,61 +87,118 @@ def fetch_and_build_csv(start_dt, start_ts, end_ts, output_file):
             inst["serial"] = f"inv_{inst_id}"
 
         dev_type = inst["type"]
+        met = metrics_by_instance[inst_id]
+
         if dev_type == "mppt":
-            if code == "PVV0": last_known[inst_id]["volt_t1"] = num_val
-            elif code == "PVP0": last_known[inst_id]["power_t1"] = num_val
-            elif code == "PVV1": last_known[inst_id]["volt_t2"] = num_val
-            elif code == "PVP1": last_known[inst_id]["power_t2"] = num_val
-            elif code in ["PVP", "ScW"]: last_known[inst_id]["power"] = num_val
-            elif code in ["PVV", "ScV"]: last_known[inst_id]["volt"] = num_val
-            elif code in ["ScI"]: last_known[inst_id]["current"] = num_val
-            elif code in ["YT"]: last_known[inst_id]["energy"] = num_val
+            if code == "PVV0": met["volt_t1"] = num_val
+            elif code == "PVP0": met["power_t1"] = num_val
+            elif code == "PVV1": met["volt_t2"] = num_val
+            elif code == "PVP1": met["power_t2"] = num_val
+            elif code in ["PVP", "ScW"]: met["power"] = num_val
+            elif code in ["PVV", "ScV"]: met["volt"] = num_val
+            elif code in ["ScI"]: met["current"] = num_val
 
         elif dev_type == "battery":
-            if code in ["SOC", "bs"]: last_known[inst_id]["state_of_charge"] = num_val
-            elif code in ["V", "bv"]: last_known[inst_id]["volt"] = num_val
-            elif code in ["I", "bc"]: last_known[inst_id]["current"] = num_val
-            elif code in ["BT", "bT", "CT"]: last_known[inst_id]["temperature"] = num_val
-            elif code in ["ca"]: last_known[inst_id]["capacity"] = num_val
-            elif code in ["BP", "bp"]: last_known[inst_id]["power"] = num_val
+            if code in ["SOC", "bs"]: met["state_of_charge"] = num_val
+            elif code in ["V", "bv"]: met["volt"] = num_val
+            elif code in ["I", "bc"]: met["current"] = num_val
+            elif code in ["BT", "bT", "CT"]: met["temperature"] = num_val
+            elif code in ["ca"]: met["capacity"] = num_val
+            elif code in ["BP", "bp"]: met["power"] = num_val
 
         elif dev_type == "converter":
-            if code in ["OP1"]: last_known[inst_id]["power"] = num_val
-            elif code in ["OV1"]: last_known[inst_id]["volt"] = num_val
-            elif code in ["OI1"]: last_known[inst_id]["current"] = num_val
-            elif code in ["IP1"]: last_known[inst_id]["power_in"] = num_val
-            elif code in ["IV1"]: last_known[inst_id]["volt_in"] = num_val
-            elif code in ["II1"]: last_known[inst_id]["current_in"] = num_val
-            elif code in ["t9"]: last_known[inst_id]["energy_tot"] = num_val
+            if code in ["OP1"]: met["power"] = num_val
+            elif code in ["OV1"]: met["volt"] = num_val
+            elif code in ["OI1"]: met["current"] = num_val
+            elif code in ["IP1"]: met["power_in"] = num_val
+            elif code in ["IV1"]: met["volt_in"] = num_val
+            elif code in ["II1"]: met["current_in"] = num_val
+            elif code in ["t9"]: met["energy_tot"] = num_val
 
-    # 2. Récupération des séries temporelles (10min)
-    url_graph = f"https://vrmapi.victronenergy.com/v2/installations/{VRM_SITE_ID}/widgets/Graph"
-    params_graph = {"start": start_ts, "end": end_ts, "interval": "10mins"}
-    
-    time_series = {}
-    try:
-        graph_res = requests.get(url_graph, headers=headers_api, params=params_graph, timeout=25).json()
-        records_graph = graph_res.get("records", {})
-        data_records = records_graph.get("data", {}) if isinstance(records_graph, dict) else {}
+    # Dictionnaires pour stocker les 4 MPPT de l'onduleur CUSTOM1
+    mppt_values = {
+        1: {"power": "", "volt": "", "current": ""},
+        2: {"power": "", "volt": "", "current": ""},
+        3: {"power": "", "volt": "", "current": ""},
+        4: {"power": "", "volt": "", "current": ""}
+    }
 
-        if isinstance(data_records, dict):
-            for attr_code, meta in data_records.items():
-                if isinstance(meta, dict) and "values" in meta:
-                    points = meta.get("values", [])
-                    for pt in points:
-                        if isinstance(pt, list) and len(pt) >= 2:
-                            ts = pt[0] / 1000.0
-                            val = pt[1]
-                            dt_pt = datetime.fromtimestamp(ts, tz=TZ_FRANCE)
-                            dt_key = dt_pt.strftime("%Y-%m-%d %H:%M:00")
+    tot_pv_power = 0.0
+    has_pv_data = False
 
-                            if dt_key not in time_series:
-                                time_series[dt_key] = {}
-                            time_series[dt_key][attr_code] = parse_number(val)
-    except Exception as e:
-        print(f" Note Graph API : {e}")
+    inv_power = ""
+    inv_volt = ""
+    inv_current = ""
+    inv_power_in = ""
+    inv_volt_in = ""
+    inv_current_in = ""
+    inv_energy_tot = ""
 
-    # 3. Structure exacte du CSV S4E Power API
+    batt_soc = ""
+    batt_volt = ""
+    batt_current = ""
+    batt_power = ""
+    batt_temp = ""
+    batt_cap = ""
+
+    for inst_id, item in instances.items():
+        dev_type = item["type"]
+        serial = item["serial"]
+        met = metrics_by_instance.get(inst_id, {})
+
+        if dev_type == "mppt":
+            # MPPT Bi-tracker (HQ2506CVYX4)
+            if "HQ2506CVYX4" in serial or "volt_t1" in met or "power_t1" in met:
+                v1 = met.get("volt_t1", "")
+                p1 = met.get("power_t1", "")
+                c1 = calc_current(p1, v1)
+
+                v2 = met.get("volt_t2", "")
+                p2 = met.get("power_t2", "")
+                c2 = calc_current(p2, v2)
+
+                mppt_values[1] = {"power": p1, "volt": v1, "current": c1}
+                mppt_values[2] = {"power": p2, "volt": v2, "current": c2}
+
+                if isinstance(p1, (int, float)): tot_pv_power += p1; has_pv_data = True
+                if isinstance(p2, (int, float)): tot_pv_power += p2; has_pv_data = True
+
+            # MPPT 3 (HQ2441TVZCW)
+            elif "HQ2441TVZCW" in serial or "278" in inst_id:
+                p3 = met.get("power", "")
+                v3 = met.get("volt", "")
+                c3 = met.get("current", calc_current(p3, v3))
+
+                mppt_values[3] = {"power": p3, "volt": v3, "current": c3}
+                if isinstance(p3, (int, float)): tot_pv_power += p3; has_pv_data = True
+
+            # MPPT 4 (HQ2441W3N4G)
+            else:
+                p4 = met.get("power", "")
+                v4 = met.get("volt", "")
+                c4 = met.get("current", calc_current(p4, v4))
+
+                mppt_values[4] = {"power": p4, "volt": v4, "current": c4}
+                if isinstance(p4, (int, float)): tot_pv_power += p4; has_pv_data = True
+
+        elif dev_type == "converter":
+            inv_power = met.get("power", "")
+            inv_volt = met.get("volt", "")
+            inv_current = met.get("current", "")
+            inv_power_in = met.get("power_in", "")
+            inv_volt_in = met.get("volt_in", "")
+            inv_current_in = met.get("current_in", "")
+            inv_energy_tot = met.get("energy_tot", "")
+
+        elif dev_type == "battery":
+            batt_soc = met.get("state_of_charge", "")
+            batt_volt = met.get("volt", "")
+            batt_current = met.get("current", "")
+            batt_power = met.get("power", "")
+            batt_temp = met.get("temperature", "")
+            batt_cap = met.get("capacity", "")
+
+    # Structure du CSV S4E Power API
     headers_csv = [
         "date", "device", "serial",
         "current.mppt.1", "power.mppt.1", "volt.mppt.1",
@@ -162,157 +210,60 @@ def fetch_and_build_csv(start_dt, start_ts, end_ts, output_file):
         "state_of_charge", "temperature", "capacity"
     ]
 
+    date_str = dt_now.strftime("%Y-%m-%d %H:%M:%S")
     rows = []
 
-    # Génération des 6 points temporels (:00, :10, :20, :30, :40, :50)
-    for m in range(0, 60, 10):
-        step_dt = start_dt + timedelta(minutes=m)
-        step_str = step_dt.strftime("%Y-%m-%d %H:%M:%S")
-        metrics_pt = time_series.get(step_str[:16] + ":00", {})
+    # 1. Ligne Onduleur CUSTOM1
+    rows.append({
+        "date": date_str,
+        "device": "inverter",
+        "serial": "CUSTOM1",
+        "current.mppt.1": mppt_values[1]["current"],
+        "power.mppt.1": mppt_values[1]["power"],
+        "volt.mppt.1": mppt_values[1]["volt"],
+        "current.mppt.2": mppt_values[2]["current"],
+        "power.mppt.2": mppt_values[2]["power"],
+        "volt.mppt.2": mppt_values[2]["volt"],
+        "current.mppt.3": mppt_values[3]["current"],
+        "power.mppt.3": mppt_values[3]["power"],
+        "volt.mppt.3": mppt_values[3]["volt"],
+        "current.mppt.4": mppt_values[4]["current"],
+        "power.mppt.4": mppt_values[4]["power"],
+        "volt.mppt.4": mppt_values[4]["volt"],
+        "power": inv_power if inv_power != "" else (tot_pv_power if has_pv_data else ""),
+        "volt": inv_volt,
+        "current": inv_current,
+        "energy": "",
+        "energy_tot": inv_energy_tot,
+        "power_in": inv_power_in,
+        "volt_in": inv_volt_in,
+        "current_in": inv_current_in,
+        "state_of_charge": "",
+        "temperature": "",
+        "capacity": ""
+    })
 
-        # Dictionnaires pour stocker les 4 MPPT de l'onduleur CUSTOM1
-        mppt_values = {
-            1: {"power": "", "volt": "", "current": ""},
-            2: {"power": "", "volt": "", "current": ""},
-            3: {"power": "", "volt": "", "current": ""},
-            4: {"power": "", "volt": "", "current": ""}
-        }
-
-        tot_pv_power = 0.0
-        has_pv_data = False
-
-        # Variables Onduleur AC
-        inv_power = ""
-        inv_volt = ""
-        inv_current = ""
-        inv_power_in = ""
-        inv_volt_in = ""
-        inv_current_in = ""
-        inv_energy_tot = ""
-
-        # Variables Batterie
-        batt_soc = ""
-        batt_volt = ""
-        batt_current = ""
-        batt_power = ""
-        batt_temp = ""
-        batt_cap = ""
-
-        for inst_id, item in instances.items():
-            dev_type = item["type"]
-            serial = item["serial"]
-            known = last_known.get(inst_id, {})
-
-            # --- Rrassemblement des 4 MPPTs pour CUSTOM1 ---
-            if dev_type == "mppt":
-                # MPPT 1 & 2 (Bi-tracker HQ2506CVYX4)
-                if "HQ2506CVYX4" in serial or "PVV0" in metrics_pt or "volt_t1" in known:
-                    v1 = metrics_pt.get("PVV0", known.get("volt_t1", ""))
-                    p1 = metrics_pt.get("PVP0", known.get("power_t1", ""))
-                    c1 = calc_current(p1, v1)
-
-                    v2 = metrics_pt.get("PVV1", known.get("volt_t2", ""))
-                    p2 = metrics_pt.get("PVP1", known.get("power_t2", ""))
-                    c2 = calc_current(p2, v2)
-
-                    mppt_values[1] = {"power": p1, "volt": v1, "current": c1}
-                    mppt_values[2] = {"power": p2, "volt": v2, "current": c2}
-
-                    if isinstance(p1, (int, float)): tot_pv_power += p1; has_pv_data = True
-                    if isinstance(p2, (int, float)): tot_pv_power += p2; has_pv_data = True
-
-                # MPPT 3 (HQ2441TVZCW)
-                elif "HQ2441TVZCW" in serial or "278" in inst_id:
-                    p3 = metrics_pt.get("PVP", metrics_pt.get("ScW", known.get("power", "")))
-                    v3 = metrics_pt.get("PVV", metrics_pt.get("ScV", known.get("volt", "")))
-                    c3 = metrics_pt.get("ScI", known.get("current", calc_current(p3, v3)))
-
-                    mppt_values[3] = {"power": p3, "volt": v3, "current": c3}
-                    if isinstance(p3, (int, float)): tot_pv_power += p3; has_pv_data = True
-
-                # MPPT 4 (HQ2441W3N4G)
-                else:
-                    p4 = metrics_pt.get("PVP", metrics_pt.get("ScW", known.get("power", "")))
-                    v4 = metrics_pt.get("PVV", metrics_pt.get("ScV", known.get("volt", "")))
-                    c4 = metrics_pt.get("ScI", known.get("current", calc_current(p4, v4)))
-
-                    mppt_values[4] = {"power": p4, "volt": v4, "current": c4}
-                    if isinstance(p4, (int, float)): tot_pv_power += p4; has_pv_data = True
-
-            # --- Extraction des données de l'onduleur / MultiPlus ---
-            elif dev_type == "converter":
-                inv_power = metrics_pt.get("OP1", known.get("power", ""))
-                inv_volt = metrics_pt.get("OV1", known.get("volt", ""))
-                inv_current = metrics_pt.get("OI1", known.get("current", ""))
-                inv_power_in = metrics_pt.get("IP1", known.get("power_in", ""))
-                inv_volt_in = metrics_pt.get("IV1", known.get("volt_in", ""))
-                inv_current_in = metrics_pt.get("II1", known.get("current_in", ""))
-                inv_energy_tot = metrics_pt.get("t9", known.get("energy_tot", ""))
-
-            # --- Extraction des données de la batterie ---
-            elif dev_type == "battery":
-                batt_soc = metrics_pt.get("SOC", metrics_pt.get("bs", known.get("state_of_charge", "")))
-                batt_volt = metrics_pt.get("V", metrics_pt.get("bv", known.get("volt", "")))
-                batt_current = metrics_pt.get("I", metrics_pt.get("bc", known.get("current", "")))
-                batt_power = metrics_pt.get("BP", metrics_pt.get("bp", known.get("power", "")))
-                batt_temp = metrics_pt.get("BT", metrics_pt.get("CT", known.get("temperature", "")))
-                batt_cap = known.get("capacity", "")
-
-        # --------------------------------------------------------------
-        # LIGNE 1 : ONDULEUR VIRTUEL "CUSTOM1" (4 MPPT DC + Côté AC)
-        # --------------------------------------------------------------
-        rows.append({
-            "date": step_str,
-            "device": "inverter",
-            "serial": "CUSTOM1",
-            "current.mppt.1": mppt_values[1]["current"],
-            "power.mppt.1": mppt_values[1]["power"],
-            "volt.mppt.1": mppt_values[1]["volt"],
-            "current.mppt.2": mppt_values[2]["current"],
-            "power.mppt.2": mppt_values[2]["power"],
-            "volt.mppt.2": mppt_values[2]["volt"],
-            "current.mppt.3": mppt_values[3]["current"],
-            "power.mppt.3": mppt_values[3]["power"],
-            "volt.mppt.3": mppt_values[3]["volt"],
-            "current.mppt.4": mppt_values[4]["current"],
-            "power.mppt.4": mppt_values[4]["power"],
-            "volt.mppt.4": mppt_values[4]["volt"],
-            "power": inv_power if inv_power != "" else (tot_pv_power if has_pv_data else ""),
-            "volt": inv_volt,
-            "current": inv_current,
-            "energy": "",
-            "energy_tot": inv_energy_tot,
-            "power_in": inv_power_in,
-            "volt_in": inv_volt_in,
-            "current_in": inv_current_in,
-            "state_of_charge": "",
-            "temperature": "",
-            "capacity": ""
-        })
-
-        # --------------------------------------------------------------
-        # LIGNE 2 : BATTERIE VIRTUELLE "BATTERIE1"
-        # --------------------------------------------------------------
-        rows.append({
-            "date": step_str,
-            "device": "battery",
-            "serial": "BATTERIE1",
-            "current.mppt.1": "", "power.mppt.1": "", "volt.mppt.1": "",
-            "current.mppt.2": "", "power.mppt.2": "", "volt.mppt.2": "",
-            "current.mppt.3": "", "power.mppt.3": "", "volt.mppt.3": "",
-            "current.mppt.4": "", "power.mppt.4": "", "volt.mppt.4": "",
-            "power": batt_power,
-            "volt": batt_volt,
-            "current": batt_current,
-            "energy": "",
-            "energy_tot": "",
-            "power_in": "",
-            "volt_in": "",
-            "current_in": "",
-            "state_of_charge": batt_soc,
-            "temperature": batt_temp,
-            "capacity": batt_cap
-        })
+    # 2. Ligne Batterie BATTERIE1
+    rows.append({
+        "date": date_str,
+        "device": "battery",
+        "serial": "BATTERIE1",
+        "current.mppt.1": "", "power.mppt.1": "", "volt.mppt.1": "",
+        "current.mppt.2": "", "power.mppt.2": "", "volt.mppt.2": "",
+        "current.mppt.3": "", "power.mppt.3": "", "volt.mppt.3": "",
+        "current.mppt.4": "", "power.mppt.4": "", "volt.mppt.4": "",
+        "power": batt_power,
+        "volt": batt_volt,
+        "current": batt_current,
+        "energy": "",
+        "energy_tot": "",
+        "power_in": "",
+        "volt_in": "",
+        "current_in": "",
+        "state_of_charge": batt_soc,
+        "temperature": batt_temp,
+        "capacity": batt_cap
+    })
 
     abs_output_path = os.path.abspath(output_file)
     with open(abs_output_path, mode="w", newline="", encoding="utf-8") as f:
@@ -320,7 +271,7 @@ def fetch_and_build_csv(start_dt, start_ts, end_ts, output_file):
         writer.writeheader()
         writer.writerows(rows)
 
-    print(f" Génération réussie pour CUSTOM1 & BATTERIE1 ({len(rows)} lignes créées).")
+    print(f" Génération du fichier unique réussie à {date_str} ({len(rows)} lignes).")
     return abs_output_path
 
 # ------------------------------------------------------------------
@@ -348,7 +299,7 @@ def upload_via_sftp(local_abs_path, remote_dir_config):
         clean_dir = clean_dir.lstrip('/')
         remote_target = f"{clean_dir}/{filename}" if not clean_dir.endswith('/') else f"{clean_dir}{filename}"
 
-    print(f" Transfert SFTP vers : '{remote_target}'...")
+    print(f" Transfert du fichier vers le serveur SFTP : '{remote_target}'...")
     
     try:
         sftp.put(local_abs_path, remote_target)
@@ -362,15 +313,15 @@ def upload_via_sftp(local_abs_path, remote_dir_config):
         ssh.close()
 
 # ------------------------------------------------------------------
-# EXECUTION
+# DÉCLENCHEMENT
 # ------------------------------------------------------------------
 if __name__ == "__main__":
     try:
-        start_dt, start_ts, end_ts = get_past_hour_window()
-        filename = generate_dynamic_filename(start_dt)
+        now_fr = get_french_now()
+        filename = generate_dynamic_filename(now_fr)
         
-        print(f"1. Génération des séries (CUSTOM1 & BATTERIE1) pour l'heure {start_dt.strftime('%H:00')}...")
-        abs_file_path = fetch_and_build_csv(start_dt, start_ts, end_ts, filename)
+        print(f"1. Récupération du point instantané à {now_fr.strftime('%H:%M:%S')}...")
+        abs_file_path = fetch_instantaneous_and_build_csv(now_fr, filename)
 
         print("2. Envoi SFTP...")
         upload_via_sftp(abs_file_path, SFTP_REMOTE_DIR)
