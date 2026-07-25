@@ -200,44 +200,52 @@ def fetch_instantaneous_and_build_csv(dt_now, output_file):
 
     # Structure du CSV S4E Power API
     headers_csv = [
-        "date", "device", "serial",
-        "current.mppt.1", "power.mppt.1", "volt.mppt.1",
-        "current.mppt.2", "power.mppt.2", "volt.mppt.2",
-        "current.mppt.3", "power.mppt.3", "volt.mppt.3",
-        "current.mppt.4", "power.mppt.4", "volt.mppt.4",
-        "power", "volt", "current", "energy", "energy_tot",
-        "power_in", "volt_in", "current_in",
-        "state_of_charge", "temperature", "capacity"
+    "date", "device", "serial",
+    "current.mppt.1", "power.mppt.1", "volt.mppt.1", "energy.mppt.1",
+    "current.mppt.2", "power.mppt.2", "volt.mppt.2", "energy.mppt.2",
+    "current.mppt.3", "power.mppt.3", "volt.mppt.3", "energy.mppt.3",
+    "current.mppt.4", "power.mppt.4", "volt.mppt.4", "energy.mppt.4",
+    "power", "volt", "current", "energy", "energy_tot",
+    "power_in", "volt_in", "current_in",
+    "state_of_charge", "temperature", "capacity"
     ]
 
     date_str = dt_now.strftime("%Y-%m-%d %H:%M:%S")
     rows = []
 
-    # 1. Ligne Onduleur CUSTOM1
+    # Extraction des énergies depuis les données VRM (vrm_data)
+    # Remplacez les clés par celles renvoyées par votre point API VRM (ex: yield_mppt1, ac_out_energy, etc.)
+    
+    energy_mppt1 = parse_number(vrm_data.get("yield_mppt1"))
+    energy_mppt2 = parse_number(vrm_data.get("yield_mppt2"))
+    energy_mppt3 = parse_number(vrm_data.get("yield_mppt3"))
+    energy_mppt4 = parse_number(vrm_data.get("yield_mppt4"))
+    
+    ac_energy_out = parse_number(vrm_data.get("ac_out_energy_tot")) # Énergie AC sortie MultiPlus
+    pv_energy_tot = parse_number(vrm_data.get("pv_yield_tot"))      # Énergie cumulée totale 4 MPPT
+    
     rows.append({
         "date": date_str,
         "device": "inverter",
         "serial": "CUSTOM1",
-        "current.mppt.1": mppt_values[1]["current"],
-        "power.mppt.1": mppt_values[1]["power"],
-        "volt.mppt.1": mppt_values[1]["volt"],
-        "current.mppt.2": mppt_values[2]["current"],
-        "power.mppt.2": mppt_values[2]["power"],
-        "volt.mppt.2": mppt_values[2]["volt"],
-        "current.mppt.3": mppt_values[3]["current"],
-        "power.mppt.3": mppt_values[3]["power"],
-        "volt.mppt.3": mppt_values[3]["volt"],
-        "current.mppt.4": mppt_values[4]["current"],
-        "power.mppt.4": mppt_values[4]["power"],
-        "volt.mppt.4": mppt_values[4]["volt"],
-        "power": inv_power if inv_power != "" else (tot_pv_power if has_pv_data else ""),
-        "volt": inv_volt,
-        "current": inv_current,
-        "energy": "",
-        "energy_tot": inv_energy_tot,
-        "power_in": inv_power_in,
-        "volt_in": inv_volt_in,
-        "current_in": inv_current_in,
+        # MPPT 1
+        "current.mppt.1": c1, "power.mppt.1": p1, "volt.mppt.1": v1, "energy.mppt.1": energy_mppt1,
+        # MPPT 2
+        "current.mppt.2": c2, "power.mppt.2": p2, "volt.mppt.2": v2, "energy.mppt.2": energy_mppt2,
+        # MPPT 3
+        "current.mppt.3": c3, "power.mppt.3": p3, "volt.mppt.3": v3, "energy.mppt.3": energy_mppt3,
+        # MPPT 4
+        "current.mppt.4": c4, "power.mppt.4": p4, "volt.mppt.4": v4, "energy.mppt.4": energy_mppt4,
+        # Sortie Onduleur AC
+        "power": ac_power_out,
+        "volt": ac_volt_out,
+        "current": ac_curr_out,
+        "energy": ac_energy_out,   # Énergie AC fournie aux consommateurs (sortie MultiPlus)
+        "energy_tot": pv_energy_tot, # Énergie DC globale générée par les 4 MPPT
+        # Entrée Réseau AC-In (MultiPlus)
+        "power_in": ac_power_in,
+        "volt_in": ac_volt_in,
+        "current_in": ac_curr_in,
         "state_of_charge": "",
         "temperature": "",
         "capacity": ""
@@ -248,10 +256,10 @@ def fetch_instantaneous_and_build_csv(dt_now, output_file):
         "date": date_str,
         "device": "battery",
         "serial": "BATTERIE1",
-        "current.mppt.1": "", "power.mppt.1": "", "volt.mppt.1": "",
-        "current.mppt.2": "", "power.mppt.2": "", "volt.mppt.2": "",
-        "current.mppt.3": "", "power.mppt.3": "", "volt.mppt.3": "",
-        "current.mppt.4": "", "power.mppt.4": "", "volt.mppt.4": "",
+        "current.mppt.1": "", "power.mppt.1": "", "volt.mppt.1": "","energy.mppt.1": "",
+        "current.mppt.2": "", "power.mppt.2": "", "volt.mppt.2": "","energy.mppt.2": "",
+        "current.mppt.3": "", "power.mppt.3": "", "volt.mppt.3": "","energy.mppt.3": "",
+        "current.mppt.4": "", "power.mppt.4": "", "volt.mppt.4": "","energy.mppt.4": "",
         "power": batt_power,
         "volt": batt_volt,
         "current": batt_current,
