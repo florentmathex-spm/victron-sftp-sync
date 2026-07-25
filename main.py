@@ -198,22 +198,37 @@ def fetch_instantaneous_and_build_csv(dt_now, output_file):
             batt_temp = met.get("temperature", "")
             batt_cap = met.get("capacity", "")
 
+    # Détermination de la puissance effective de l'onduleur
+    current_inv_power = inv_power if inv_power != "" else (tot_pv_power if has_pv_data else "")
+
+    # Calcul de la variable power_limitation_pct
+    power_limitation_pct = ""
+    if isinstance(batt_soc, (int, float)):
+        if batt_soc > 97.5:
+            if isinstance(current_inv_power, (int, float)):
+                power_limitation_pct = round((current_inv_power / 11700) * 100, 2)
+            else:
+                power_limitation_pct = ""
+        else:
+            power_limitation_pct = 100
+
     # Structure du CSV S4E Power API
     headers_csv = [
-    "date", "device", "serial",
-    "current.mppt.1", "power.mppt.1", "volt.mppt.1",
-    "current.mppt.2", "power.mppt.2", "volt.mppt.2",
-    "current.mppt.3", "power.mppt.3", "volt.mppt.3",
-    "current.mppt.4", "power.mppt.4", "volt.mppt.4",
-    "power", "volt", "current", "energy", "energy_tot",
-    "power_in", "volt_in", "current_in",
-    "state_of_charge", "temperature", "capacity"
+        "date", "device", "serial",
+        "current.mppt.1", "power.mppt.1", "volt.mppt.1",
+        "current.mppt.2", "power.mppt.2", "volt.mppt.2",
+        "current.mppt.3", "power.mppt.3", "volt.mppt.3",
+        "current.mppt.4", "power.mppt.4", "volt.mppt.4",
+        "power", "volt", "current", "energy", "energy_tot",
+        "power_in", "volt_in", "current_in",
+        "state_of_charge", "temperature", "capacity",
+        "power_limitation_pct"
     ]
 
-    # 1. Ligne Onduleur CUSTOM1
-    
     date_str = dt_now.strftime("%Y-%m-%d %H:%M:%S")
     rows = []
+
+    # 1. Ligne Onduleur CUSTOM1
     rows.append({
         "date": date_str,
         "device": "inverter",
@@ -230,7 +245,7 @@ def fetch_instantaneous_and_build_csv(dt_now, output_file):
         "current.mppt.4": mppt_values[4]["current"],
         "power.mppt.4": mppt_values[4]["power"],
         "volt.mppt.4": mppt_values[4]["volt"],
-        "power": inv_power if inv_power != "" else (tot_pv_power if has_pv_data else ""),
+        "power": current_inv_power,
         "volt": inv_volt,
         "current": inv_current,
         "energy": "",
@@ -240,7 +255,8 @@ def fetch_instantaneous_and_build_csv(dt_now, output_file):
         "current_in": inv_current_in,
         "state_of_charge": "",
         "temperature": "",
-        "capacity": ""
+        "capacity": "",
+        "power_limitation_pct": power_limitation_pct
     })
 
     # 2. Ligne Batterie BATTERIE1
@@ -262,7 +278,8 @@ def fetch_instantaneous_and_build_csv(dt_now, output_file):
         "current_in": "",
         "state_of_charge": batt_soc,
         "temperature": batt_temp,
-        "capacity": batt_cap
+        "capacity": batt_cap,
+        "power_limitation_pct": ""
     })
 
     abs_output_path = os.path.abspath(output_file)
@@ -318,7 +335,6 @@ def get_french_now_rounded_5min():
     Exemple : 12:04:35 -> 12:00:00 | 12:07:12 -> 12:05:00
     """
     now = datetime.now(TZ_FRANCE)
-    # Arrondi de la minute au multiple de 5 inférieur
     rounded_minute = (now.minute // 5) * 5
     return now.replace(minute=rounded_minute, second=0, microsecond=0)
 
@@ -327,7 +343,6 @@ def get_french_now_rounded_5min():
 # ------------------------------------------------------------------
 if __name__ == "__main__":
     try:
-        # Récupère l'heure arrondie à la tranche de 5 min (ex: 12:00:00)
         now_fr = get_french_now_rounded_5min()
         filename = generate_dynamic_filename(now_fr)
         
