@@ -3,7 +3,7 @@ name: Automation Victron vers SaaS Energysoft
 on:
   schedule:
     # '*/5 * * * *' signifie "exécuter toutes les 5 minutes"
-    #- cron: '*/5 * * * *'
+    - cron: '*/5 * * * *'
   # Permet aussi de déclencher le script manuellement si besoin
   workflow_dispatch:
 
