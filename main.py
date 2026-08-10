@@ -90,30 +90,30 @@ def fetch_instantaneous_and_build_csv(dt_now, output_file):
         met = metrics_by_instance[inst_id]
 
         if dev_type == "mppt":
-            if code == "PVV0": met["volt_t1"] = num_val*3
-            elif code == "PVP0": met["power_t1"] = num_val*3
-            elif code == "PVV1": met["volt_t2"] = num_val*3
-            elif code == "PVP1": met["power_t2"] = num_val*3
-            elif code in ["PVP", "ScW"]: met["power"] = num_val*3
-            elif code in ["PVV", "ScV"]: met["volt"] = num_val*3
+            if code == "PVV0": met["volt_t1"] = num_val
+            elif code == "PVP0": met["power_t1"] = num_val
+            elif code == "PVV1": met["volt_t2"] = num_val
+            elif code == "PVP1": met["power_t2"] = num_val
+            elif code in ["PVP", "ScW"]: met["power"] = num_val
+            elif code in ["PVV", "ScV"]: met["volt"] = num_val
             elif code in ["ScI"]: met["current"] = num_val
 
         elif dev_type == "battery":
             if code in ["SOC", "bs"]: met["state_of_charge"] = num_val
             elif code in ["V", "bv"]: met["volt"] = num_val
-            elif code in ["I", "bc"]: met["current"] = num_val*3
+            elif code in ["I", "bc"]: met["current"] = num_val
             elif code in ["BT", "bT", "CT"]: met["temperature"] = num_val
             elif code in ["ca"]: met["capacity"] = num_val
-            elif code in ["BP", "bp"]: met["power"] = num_val*3
+            elif code in ["BP", "bp"]: met["power"] = num_val
 
         elif dev_type == "converter":
-            if code in ["OP1"]: met["power"] = num_val*3
+            if code in ["OP1"]: met["power"] = num_val
             elif code in ["OV1"]: met["volt"] = num_val
-            elif code in ["OI1"]: met["current"] = num_val*3
-            elif code in ["IP1"]: met["power_in"] = num_val*3
-            elif code in ["IV1"]: met["volt_in"] = num_val*3
+            elif code in ["OI1"]: met["current"] = num_val
+            elif code in ["IP1"]: met["power_in"] = num_val
+            elif code in ["IV1"]: met["volt_in"] = num_val
             elif code in ["II1"]: met["current_in"] = num_val
-            elif code in ["t9"]: met["energy_tot"] = num_val*3
+            elif code in ["t9"]: met["energy_tot"] = num_val
 
     # Dictionnaires pour stocker les 4 MPPT de l'onduleur CUSTOM1
     mppt_values = {
