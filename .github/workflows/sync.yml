@@ -1,7 +1,10 @@
-name: Automation Victron vers SaaS Energysoft
+name: Automation Victron vers SaaS Energysoft & Solar-PM
 
 on:
   workflow_dispatch:
+  schedule:
+    # Exécution automatique toutes les 5 minutes (optionnel)
+    - cron: '*/5 * * * *'
 
 jobs:
   run-python-script:
@@ -12,7 +15,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Configuration de Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
@@ -24,9 +27,16 @@ jobs:
         env:
           VRM_API_TOKEN: ${{ secrets.VRM_API_TOKEN }}
           VRM_SITE_ID: ${{ secrets.VRM_SITE_ID }}
+          # --- SFTP 1 : Energysoft ---
           SFTP_HOST: ${{ secrets.SFTP_HOST }}
           SFTP_PORT: ${{ secrets.SFTP_PORT }}
           SFTP_USER: ${{ secrets.SFTP_USER }}
           SFTP_PASS: ${{ secrets.SFTP_PASS }}
           SFTP_REMOTE_PATH: ${{ secrets.SFTP_REMOTE_PATH }}
+          # --- SFTP 2 : Solar-PM (Ton Serveur Docker) ---
+          SFTP2_HOST: ${{ secrets.SFTP2_HOST }}
+          SFTP2_PORT: ${{ secrets.SFTP2_PORT }}
+          SFTP2_USER: ${{ secrets.SFTP2_USER }}
+          SFTP2_PASS: ${{ secrets.SFTP2_PASS }}
+          SFTP2_REMOTE_PATH: upload
         run: python main.py
