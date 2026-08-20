@@ -312,13 +312,12 @@ def upload_to_single_sftp(local_abs_path, server_config):
         return False
 
     filename = os.path.basename(local_abs_path)
-    clean_dir = (remote_dir_config or "").strip()
+    clean_dir = (remote_dir_config or "").strip().strip('/')
 
-    if clean_dir in ["", ".", "./", "/"]:
+    if clean_dir in ["", "."]:
         remote_target = filename
     else:
-        clean_dir = clean_dir.lstrip('/')
-        remote_target = f"{clean_dir}/{filename}" if not clean_dir.endswith('/') else f"{clean_dir}{filename}"
+        remote_target = f"{clean_dir}/{filename}"
 
     print(f" Transfert vers {name} ({host}:{port}) -> '{remote_target}'...")
 
