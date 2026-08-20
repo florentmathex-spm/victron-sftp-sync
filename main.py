@@ -11,11 +11,25 @@ import zoneinfo
 VRM_API_TOKEN = os.getenv("VRM_API_TOKEN")
 VRM_SITE_ID = os.getenv("VRM_SITE_ID")
 
-SFTP_HOST = os.getenv("SFTP_HOST")
-SFTP_PORT = int(os.getenv("SFTP_PORT", 22))
-SFTP_USER = os.getenv("SFTP_USER")
-SFTP_PASS = os.getenv("SFTP_PASS")
-SFTP_REMOTE_DIR = os.getenv("SFTP_REMOTE_PATH", "./")
+# --- LISTE DES SERVEURS SFTP ---
+SFTP_SERVERS = [
+    {
+        "name": "SFTP 1 (Actuel)",
+        "host": os.getenv("SFTP_HOST"),
+        "port": int(os.getenv("SFTP_PORT", 22)),
+        "user": os.getenv("SFTP_USER"),
+        "pass": os.getenv("SFTP_PASS"),
+        "remote_dir": os.getenv("SFTP_REMOTE_PATH", "./")
+    },
+    {
+        "name": "SFTP 2 (Solar-PM)",
+        "host": os.getenv("SFTP2_HOST", "sftp.solar-pm.fr"),
+        "port": int(os.getenv("SFTP2_PORT", 2222)),
+        "user": os.getenv("SFTP2_USER", "centrale_user"),
+        "pass": os.getenv("SFTP2_PASS", "password123"),
+        "remote_dir": os.getenv("SFTP2_REMOTE_PATH", "./")
+    }
+]
 
 TZ_FRANCE = zoneinfo.ZoneInfo("Europe/Paris")
 
@@ -39,7 +53,7 @@ def parse_number(val):
         return ""
 
 def calc_current(power, volt):
-    """Calcule I = P / V si la tension est strictement positive"""
+    """Calcule I = P / V si la tension est strictly positive"""
     if isinstance(power, (int, float)) and isinstance(volt, (int, float)) and volt > 0:
         return round(power / volt, 2)
     return 0.0
@@ -53,7 +67,6 @@ def fetch_instantaneous_and_build_csv(dt_now, output_file):
         "Content-Type": "application/json"
     }
 
-    # Interrogation directe de l'endpoint diagnostics
     url_diag = f"https://vrmapi.victronenergy.com/v2/installations/{VRM_SITE_ID}/diagnostics"
     diag_res = requests.get(url_diag, headers=headers_api, timeout=20).json()
     records_diag = diag_res.get("records", [])
@@ -115,7 +128,6 @@ def fetch_instantaneous_and_build_csv(dt_now, output_file):
             elif code in ["II1"]: met["current_in"] = num_val
             elif code in ["t9"]: met["energy_tot"] = num_val
 
-    # Dictionnaires pour stocker les 4 MPPT de l'onduleur CUSTOM1
     mppt_values = {
         1: {"power": "", "volt": "", "current": ""},
         2: {"power": "", "volt": "", "current": ""},
@@ -147,7 +159,6 @@ def fetch_instantaneous_and_build_csv(dt_now, output_file):
         met = metrics_by_instance.get(inst_id, {})
 
         if dev_type == "mppt":
-            # MPPT Bi-tracker (HQ2506CVYX4)
             if "HQ2506CVYX4" in serial or "volt_t1" in met or "power_t1" in met:
                 v1 = met.get("volt_t1", "")
                 p1 = met.get("power_t1", "")
@@ -163,7 +174,6 @@ def fetch_instantaneous_and_build_csv(dt_now, output_file):
                 if isinstance(p1, (int, float)): tot_pv_power += p1; has_pv_data = True
                 if isinstance(p2, (int, float)): tot_pv_power += p2; has_pv_data = True
 
-            # MPPT 3 (HQ2441TVZCW)
             elif "HQ2441TVZCW" in serial or "278" in inst_id:
                 p3 = met.get("power", "")
                 v3 = met.get("volt", "")
@@ -172,7 +182,6 @@ def fetch_instantaneous_and_build_csv(dt_now, output_file):
                 mppt_values[3] = {"power": p3, "volt": v3, "current": c3}
                 if isinstance(p3, (int, float)): tot_pv_power += p3; has_pv_data = True
 
-            # MPPT 4 (HQ2441W3N4G)
             else:
                 p4 = met.get("power", "")
                 v4 = met.get("volt", "")
@@ -198,10 +207,8 @@ def fetch_instantaneous_and_build_csv(dt_now, output_file):
             batt_temp = met.get("temperature", "")
             batt_cap = met.get("capacity", "")
 
-    # Détermination de la puissance effective de l'onduleur
     current_inv_power = inv_power if inv_power != "" else (tot_pv_power if has_pv_data else "")
 
-    # Calcul de la variable power_limitation_pct
     power_limitation_pct = ""
     if isinstance(batt_soc, (int, float)):
         if batt_soc > 97.5:
@@ -212,7 +219,6 @@ def fetch_instantaneous_and_build_csv(dt_now, output_file):
         else:
             power_limitation_pct = 100
 
-    # Structure du CSV S4E Power API
     headers_csv = [
         "date", "device", "serial",
         "current.mppt.1", "power.mppt.1", "volt.mppt.1",
@@ -228,7 +234,6 @@ def fetch_instantaneous_and_build_csv(dt_now, output_file):
     date_str = dt_now.strftime("%Y-%m-%d %H:%M:%S")
     rows = []
 
-    # 1. Ligne Onduleur CUSTOM1
     rows.append({
         "date": date_str,
         "device": "inverter",
@@ -259,7 +264,6 @@ def fetch_instantaneous_and_build_csv(dt_now, output_file):
         "power_limitation_pct": power_limitation_pct
     })
 
-    # 2. Ligne Batterie BATTERIE1
     rows.append({
         "date": date_str,
         "device": "battery",
@@ -292,48 +296,70 @@ def fetch_instantaneous_and_build_csv(dt_now, output_file):
     return abs_output_path
 
 # ------------------------------------------------------------------
-# ENVOI SFTP ROBUSTE
+# ENVOI SFTP MULTI-SERVEURS
 # ------------------------------------------------------------------
-def upload_via_sftp(local_abs_path, remote_dir_config):
-    if not os.path.exists(local_abs_path):
-        raise FileNotFoundError(f"Le fichier local '{local_abs_path}' est introuvable.")
+def upload_to_single_sftp(local_abs_path, server_config):
+    """Effectue l'envoi sur un serveur SFTP donné"""
+    name = server_config["name"]
+    host = server_config["host"]
+    port = server_config["port"]
+    user = server_config["user"]
+    password = server_config["pass"]
+    remote_dir_config = server_config["remote_dir"]
+
+    if not host or not user:
+        print(f" Config manquante pour {name}, envoi ignoré.")
+        return False
 
     filename = os.path.basename(local_abs_path)
-    
-    ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    ssh.connect(
-        hostname=SFTP_HOST, port=SFTP_PORT, username=SFTP_USER, password=SFTP_PASS,
-        look_for_keys=False, allow_agent=False, timeout=15
-    )
-    
-    sftp = ssh.open_sftp()
     clean_dir = (remote_dir_config or "").strip()
-    
+
     if clean_dir in ["", ".", "./", "/"]:
         remote_target = filename
     else:
         clean_dir = clean_dir.lstrip('/')
         remote_target = f"{clean_dir}/{filename}" if not clean_dir.endswith('/') else f"{clean_dir}{filename}"
 
-    print(f" Transfert du fichier vers le serveur SFTP : '{remote_target}'...")
-    
+    print(f" Transfert vers {name} ({host}:{port}) -> '{remote_target}'...")
+
     try:
-        sftp.put(local_abs_path, remote_target)
-        print(" Transfert SFTP réussi avec succès !")
-    except PermissionError:
-        print(f" ERREUR DROITS : Permission refusée sur '{remote_target}'. Dépôt de secours...")
-        sftp.put(local_abs_path, filename)
-        print(" Transfert de secours réussi !")
-    finally:
-        sftp.close()
-        ssh.close()
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(
+            hostname=host, port=port, username=user, password=password,
+            look_for_keys=False, allow_agent=False, timeout=15
+        )
+
+        sftp = ssh.open_sftp()
+        try:
+            sftp.put(local_abs_path, remote_target)
+            print(f" Transfert réussi sur {name} !")
+            return True
+        except PermissionError:
+            print(f" ERREUR DROITS sur {name} ('{remote_target}'). Dépôt de secours à la racine...")
+            sftp.put(local_abs_path, filename)
+            print(f" Transfert de secours réussi sur {name} !")
+            return True
+        finally:
+            sftp.close()
+            ssh.close()
+
+    except Exception as e:
+        print(f" ÉCHEC du transfert vers {name} : {e}")
+        return False
+
+def upload_via_multi_sftp(local_abs_path):
+    if not os.path.exists(local_abs_path):
+        raise FileNotFoundError(f"Le fichier local '{local_abs_path}' est introuvable.")
+
+    results = []
+    for server in SFTP_SERVERS:
+        res = upload_to_single_sftp(local_abs_path, server)
+        results.append(res)
+    
+    return any(results)
 
 def get_french_now_rounded_5min():
-    """
-    Renvoie l'heure française arrondie à la tranche de 5 minutes inférieure
-    Exemple : 12:04:35 -> 12:00:00 | 12:07:12 -> 12:05:00
-    """
     now = datetime.now(TZ_FRANCE)
     rounded_minute = (now.minute // 5) * 5
     return now.replace(minute=rounded_minute, second=0, microsecond=0)
@@ -345,16 +371,16 @@ if __name__ == "__main__":
     try:
         now_fr = get_french_now_rounded_5min()
         filename = generate_dynamic_filename(now_fr)
-        
-        print(f"1. Récupération du point instantané pour le creneau {now_fr.strftime('%H:%M:%S')}...")
+
+        print(f"1. Récupération du point instantané pour le créneau {now_fr.strftime('%H:%M:%S')}...")
         abs_file_path = fetch_instantaneous_and_build_csv(now_fr, filename)
 
-        print("2. Envoi SFTP...")
-        upload_via_sftp(abs_file_path, SFTP_REMOTE_DIR)
+        print("2. Envoi vers les 2 serveurs SFTP...")
+        upload_via_multi_sftp(abs_file_path)
 
         if os.path.exists(abs_file_path):
             os.remove(abs_file_path)
-            
+
     except Exception as e:
-        print(f" Erreur : {e}")
+        print(f" Erreur globale : {e}")
         exit(1)
