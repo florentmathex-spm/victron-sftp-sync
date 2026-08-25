@@ -138,6 +138,7 @@ def fetch_instantaneous_and_build_csv(dt_now, output_file):
     tot_pv_power = 0.0
     has_pv_data = False
 
+    inv_power = ""
     inv_volt = ""
     inv_current = ""
     inv_power_in = ""
@@ -190,6 +191,7 @@ def fetch_instantaneous_and_build_csv(dt_now, output_file):
                 if isinstance(p4, (int, float)): tot_pv_power += p4; has_pv_data = True
 
         elif dev_type == "converter":
+            inv_power = met.get("power", "")  # Puissance mesurée via l'API (MultiPlus)
             inv_volt = met.get("volt", "")
             inv_current = met.get("current", "")
             inv_power_in = met.get("power_in", "")
@@ -205,18 +207,14 @@ def fetch_instantaneous_and_build_csv(dt_now, output_file):
             batt_temp = met.get("temperature", "")
             batt_cap = met.get("capacity", "")
 
-    # --- NOUVELLE LOGIQUE DE PUISSANCE ONDULEUR ---
-    # Puissance = Somme des 4 MPPTs * 0.98 (Rendement DC/AC)
-    if has_pv_data:
-        current_inv_power = round(tot_pv_power * 0.98, 2)
-    else:
-        current_inv_power = ""
+    # Puissance AC calculée de l'onduleur CUSTOM1 = Somme MPPTs * 0.98
+    calculated_custom1_power = round(tot_pv_power * 0.98, 2) if has_pv_data else ""
 
     power_limitation_pct = ""
     if isinstance(batt_soc, (int, float)):
         if batt_soc > 97.5:
-            if isinstance(current_inv_power, (int, float)):
-                power_limitation_pct = round((current_inv_power / 11700) * 100, 2)
+            if isinstance(calculated_custom1_power, (int, float)):
+                power_limitation_pct = round((calculated_custom1_power / 11700) * 100, 2)
             else:
                 power_limitation_pct = ""
         else:
@@ -237,7 +235,7 @@ def fetch_instantaneous_and_build_csv(dt_now, output_file):
     date_str = dt_now.strftime("%Y-%m-%d %H:%M:%S")
     rows = []
 
-    # 1. ONDULEUR (CUSTOM1)
+    # 1. ONDULEUR (CUSTOM1) -> Puissance issue des 4 MPPTs x 98%
     rows.append({
         "date": date_str,
         "device": "inverter",
@@ -254,7 +252,7 @@ def fetch_instantaneous_and_build_csv(dt_now, output_file):
         "current.mppt.4": mppt_values[4]["current"],
         "power.mppt.4": mppt_values[4]["power"],
         "volt.mppt.4": mppt_values[4]["volt"],
-        "power": current_inv_power,
+        "power": calculated_custom1_power,
         "volt": inv_volt,
         "current": inv_current,
         "energy": "",
@@ -268,7 +266,7 @@ def fetch_instantaneous_and_build_csv(dt_now, output_file):
         "power_limitation_pct": power_limitation_pct
     })
 
-    # 2. COMPTEUR DE MESURE (METER1)
+    # 2. COMPTEUR DE MESURE (METER1) -> Puissance consommée mesurée via l'API Victron MultiPlus (inv_power)
     rows.append({
         "date": date_str,
         "device": "meter",
@@ -277,7 +275,7 @@ def fetch_instantaneous_and_build_csv(dt_now, output_file):
         "current.mppt.2": "", "power.mppt.2": "", "volt.mppt.2": "",
         "current.mppt.3": "", "power.mppt.3": "", "volt.mppt.3": "",
         "current.mppt.4": "", "power.mppt.4": "", "volt.mppt.4": "",
-        "power": current_inv_power,  # Reçoit la puissance attribuée à CUSTOM1
+        "power": inv_power,  # Ancienne valeur brute de custom1.power
         "volt": inv_volt,
         "current": inv_current,
         "energy": "",
@@ -327,7 +325,6 @@ def fetch_instantaneous_and_build_csv(dt_now, output_file):
 # ENVOI SFTP MULTI-SERVEURS
 # ------------------------------------------------------------------
 def upload_to_single_sftp(local_abs_path, server_config):
-    """Effectue l'envoi sur un serveur SFTP donné"""
     name = server_config["name"]
     host = server_config["host"]
     port = server_config["port"]
