@@ -53,13 +53,13 @@ def parse_number(val):
         return ""
 
 def calc_current(power, volt):
-    """Calcule I = P / V si la tension est strictly positive"""
+    """Calcule I = P / V si la tension est strictement positive"""
     if isinstance(power, (int, float)) and isinstance(volt, (int, float)) and volt > 0:
         return round(power / volt, 2)
     return 0.0
 
 # ------------------------------------------------------------------
-# EXTRACTION & CONSTRUCTION DU POINT UNIQUE (CUSTOM1 & BATTERIE1)
+# EXTRACTION & CONSTRUCTION DU POINT UNIQUE (CUSTOM1, METER1 & BATTERIE1)
 # ------------------------------------------------------------------
 def fetch_instantaneous_and_build_csv(dt_now, output_file):
     headers_api = {
@@ -138,7 +138,6 @@ def fetch_instantaneous_and_build_csv(dt_now, output_file):
     tot_pv_power = 0.0
     has_pv_data = False
 
-    inv_power = ""
     inv_volt = ""
     inv_current = ""
     inv_power_in = ""
@@ -191,7 +190,6 @@ def fetch_instantaneous_and_build_csv(dt_now, output_file):
                 if isinstance(p4, (int, float)): tot_pv_power += p4; has_pv_data = True
 
         elif dev_type == "converter":
-            inv_power = met.get("power", "")
             inv_volt = met.get("volt", "")
             inv_current = met.get("current", "")
             inv_power_in = met.get("power_in", "")
@@ -207,7 +205,12 @@ def fetch_instantaneous_and_build_csv(dt_now, output_file):
             batt_temp = met.get("temperature", "")
             batt_cap = met.get("capacity", "")
 
-    current_inv_power = inv_power if inv_power != "" else (tot_pv_power if has_pv_data else "")
+    # --- NOUVELLE LOGIQUE DE PUISSANCE ONDULEUR ---
+    # Puissance = Somme des 4 MPPTs * 0.98 (Rendement DC/AC)
+    if has_pv_data:
+        current_inv_power = round(tot_pv_power * 0.98, 2)
+    else:
+        current_inv_power = ""
 
     power_limitation_pct = ""
     if isinstance(batt_soc, (int, float)):
@@ -234,6 +237,7 @@ def fetch_instantaneous_and_build_csv(dt_now, output_file):
     date_str = dt_now.strftime("%Y-%m-%d %H:%M:%S")
     rows = []
 
+    # 1. ONDULEUR (CUSTOM1)
     rows.append({
         "date": date_str,
         "device": "inverter",
@@ -264,6 +268,30 @@ def fetch_instantaneous_and_build_csv(dt_now, output_file):
         "power_limitation_pct": power_limitation_pct
     })
 
+    # 2. COMPTEUR DE MESURE (METER1)
+    rows.append({
+        "date": date_str,
+        "device": "meter",
+        "serial": "METER1",
+        "current.mppt.1": "", "power.mppt.1": "", "volt.mppt.1": "",
+        "current.mppt.2": "", "power.mppt.2": "", "volt.mppt.2": "",
+        "current.mppt.3": "", "power.mppt.3": "", "volt.mppt.3": "",
+        "current.mppt.4": "", "power.mppt.4": "", "volt.mppt.4": "",
+        "power": current_inv_power,  # Reçoit la puissance attribuée à CUSTOM1
+        "volt": inv_volt,
+        "current": inv_current,
+        "energy": "",
+        "energy_tot": inv_energy_tot,
+        "power_in": "",
+        "volt_in": "",
+        "current_in": "",
+        "state_of_charge": "",
+        "temperature": "",
+        "capacity": "",
+        "power_limitation_pct": ""
+    })
+
+    # 3. BATTERIE (BATTERIE1)
     rows.append({
         "date": date_str,
         "device": "battery",
