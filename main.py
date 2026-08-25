@@ -59,7 +59,7 @@ def calc_current(power, volt):
     return 0.0
 
 # ------------------------------------------------------------------
-# EXTRACTION & CONSTRUCTION DU POINT UNIQUE (CUSTOM1, METER1 & BATTERIE1)
+# EXTRACTION & CONSTRUCTION DU POINT UNIQUE (CUSTOM1, METER1 & 1)
 # ------------------------------------------------------------------
 def fetch_instantaneous_and_build_csv(dt_now, output_file):
     headers_api = {
@@ -289,11 +289,11 @@ def fetch_instantaneous_and_build_csv(dt_now, output_file):
         "power_limitation_pct": ""
     })
 
-    # 3. BATTERIE (BATTERIE1)
+    # 3.  (BATTERIE1)
     rows.append({
         "date": date_str,
         "device": "battery",
-        "serial": "BATTERIE1",
+        "serial": "BATTERY1",
         "current.mppt.1": "", "power.mppt.1": "", "volt.mppt.1": "",
         "current.mppt.2": "", "power.mppt.2": "", "volt.mppt.2": "",
         "current.mppt.3": "", "power.mppt.3": "", "volt.mppt.3": "",
