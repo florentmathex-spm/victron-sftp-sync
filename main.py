@@ -9,7 +9,7 @@ import zoneinfo
 # CONFIGURATION & SECRETS
 # ------------------------------------------------------------------
 VRM_API_TOKEN = os.getenv("VRM_API_TOKEN")
-VRM_SITE_ID = os.getenv("VRM_SITE_ID")
+VRM_SITE_ID = os.getenv("VRM_SITE_ID") 
 
 # --- LISTE DES SERVEURS SFTP ---
 SFTP_SERVERS = [
